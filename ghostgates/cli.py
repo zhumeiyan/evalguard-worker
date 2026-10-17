@@ -218,6 +218,36 @@ def quote_body(issue: dict) -> str:
             f"and the full package is released."), price
 
 
+RELEASE = ("https://github.com/zhumeiyan/evalguard/releases/download/"
+           "v0.3.0/evalguard-v0.3.0.zip")
+
+
+def fulfil_order(issue: dict):
+    """Paid order: needs tier + payment reference, then ships the download."""
+    body = issue.get("body") or ""
+    mt = re.search(r"tier\s*:\s*(\w+)", body, re.I)
+    mr = re.search(r"reference\s*:\s*([^\s`<]+)", body, re.I)
+    tier = (mt.group(1).lower() if mt else "starter")
+    ref = (mr.group(1) if mr else "").strip()
+    num = issue.get("number")
+    if not ref or ref.lower() in ("", "none", "todo"):
+        return (False,
+                f"## Almost there -- order #{num}\n\n"
+                f"Tier detected: **{tier}**.\n\n"
+                f"The `reference` field is empty, so the package can't be released yet.\n"
+                f"Reply in this issue with the reference number you got from "
+                f"remit.alipay.com (any string, e.g. the transfer confirmation code) "
+                f"and the download link is released immediately.")
+    return (True,
+            f"## Order #{num} -- delivered\n\n"
+            f"- tier: **{tier}**\n"
+            f"- payment reference: `{ref}`\n\n"
+            f"**Download:** {RELEASE}\n\n"
+            f"```bash\nunzip evalguard-v0.3.0.zip\ncd evalguard\n"
+            f"python3 -m evalguard your_eval.py\n```\n\n"
+            f"MIT licensed, no activation key. Reply here if the link misbehaves.")
+
+
 # ---------------------------------------------------------------- main
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -244,20 +274,26 @@ def main(argv=None) -> int:
             continue
         body = issue.get("body") or ""
         code = pick_code(body)
-        if code:
+        if re.search(r"tier\s*:", body, re.I):
+            ok, reply = fulfil_order(issue)
+            tag = "delivered" if ok else "need-reference"
+        elif code:
             findings = analyze(code)
             reply = render(findings, "Free-tier scan of the snippet you posted:")
             tag = "scanned"
+            ok = True
         else:
             reply, price = quote_body(issue)
             tag = "quoted"
+            ok = True
         st2, _ = api("POST", f"/repos/{repo}/issues/{num}/comments", token,
                      {"body": reply})
         print(f"[worker] #{num} comment -> {st2} ({tag})")
         if st2 in (200, 201):
             api("POST", f"/repos/{repo}/issues/{num}/labels", token,
-                {"labels": [tag, "fulfilled"]})
-            api("PATCH", f"/repos/{repo}/issues/{num}", token, {"state": "closed"})
+                {"labels": [tag] + (["fulfilled"] if ok else [])})
+            if ok:
+                api("PATCH", f"/repos/{repo}/issues/{num}", token, {"state": "closed"})
             handled += 1
     print(f"[worker] handled={handled}")
     return 0
